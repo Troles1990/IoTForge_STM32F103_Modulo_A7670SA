@@ -222,27 +222,4 @@ Link programa sscom32E   https://drive.google.com/file/d/0B4GOwiN2Qm96R2V0dVFlSX
 Link comandos modulo https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/module/sim7680/A76XX%20Series%20MQTT_EX_AT%20Command%20Manual_V1.00.pdf
 Link manual modulo https://manuals.plus/ae/1005006666698901#google_vignette o en aliexpress (SIMCOM A7670SA Serie LTE Cat 1 Módulo TTL)
 
-Conexion Fuente
-Fuente 5V 2A+
-    │
-    ├──► Pin V (CN101) del A7670SA
-    └──► GND común con STM32
-
-STM32 PA9  (TX) ──► Pin R (CN101) RXD módulo
-STM32 PA10 (RX) ──► Pin T (CN101) TXD módulo
-GND común
-
-PC ──USB-C──► Blue Pill (CDC Virtual COM
-
-
-LCD TFT Connexion
-LCD	STM32
-VCC	3.3V
-GND	GND
-SCL	PA5
-SDA	PA7
-CS	PA1
-DC/A0	PA2
-LED/BL	PA3
-RES	PB0
 
