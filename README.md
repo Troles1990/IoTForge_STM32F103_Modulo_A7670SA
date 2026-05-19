@@ -215,12 +215,13 @@ mqtt.iaintegracion.space
 
 *Guía generada para IoTForge — Ejemplo STM32 A7670SA*
 
-----
+---
+
 ## Links de recursos
 
--Links de driver del modulo https://github.com/TDLOGY/SIMCOM_USB_DRIVER/tree/main
--Link programa sscom32E   https://drive.google.com/file/d/0B4GOwiN2Qm96R2V0dVFlSXltVWs/view?resourcekey=0-SR9QQdTR1vm3Zg7-tPDJIg
--Link comandos modulo https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/module/sim7680/A76XX%20Series%20MQTT_EX_AT%20Command%20Manual_V1.00.pdf
--Link manual modulo https://manuals.plus/ae/1005006666698901#google_vignette o en aliexpress (SIMCOM A7670SA Serie LTE Cat 1 Módulo TTL)
+- [Driver del módulo SIMCom USB](https://github.com/TDLOGY/SIMCOM_USB_DRIVER/tree/main)
+- [Programa SSCOM32E](https://drive.google.com/file/d/0B4GOwiN2Qm96R2V0dVFlSXltVWs/view?resourcekey=0-SR9QQdTR1vm3Zg7-tPDJIg)
+- [Comandos MQTT del módulo A76XX](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/module/sim7680/A76XX%20Series%20MQTT_EX_AT%20Command%20Manual_V1.00.pdf)
+- [Manual del módulo A7670SA](https://manuals.plus/ae/1005006666698901#google_vignette)
 
 ---
