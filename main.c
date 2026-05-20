@@ -43,13 +43,13 @@
 // El usuario solo debe reemplazar los valores entre comillas.
 // ============================================================
 
-#define IOTF_APN          "internet.newww.com"
+#define IOTF_APN          "tu.apn.operador"
 #define IOTF_BROKER       "mqtt.iaintegracion.space"
 #define IOTF_PORT         8883
-#define IOTF_THING_ID     "tu_id_nodo"
-#define IOTF_DEVICE_ID    "tu_id_dispositivo"
-#define IOTF_DEVICE_TOKEN "tu_token_del_dispositivo"
-#define IOTF_VAR_ID       "tu_id_variable"
+#define IOTF_THING_ID     "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#define IOTF_DEVICE_ID    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#define IOTF_DEVICE_TOKEN "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+#define IOTF_VAR_ID       "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 #define IOTF_CA_FILE      "isrgrootx1.pem"
 
 // ============================================================
@@ -121,6 +121,7 @@ static void MX_USART1_UART_Init(void);
 
 static void sendRaw(const char *data);
 static void sendAT(const char *cmd, uint32_t timeout_ms);
+static bool sendATExpect(const char *cmd, const char *expected, uint32_t timeout_ms);
 static bool respHas(const char *needle);
 static void mqttPublishRaw(const char *topic, const char *payload);
 static void publishStatus(const char *status);
@@ -196,6 +197,48 @@ static void sendAT(const char *cmd, uint32_t timeout_ms)
 }
 
 // ============================================================
+// BLOQUE IOTFORGE - COMANDO AT ESPERANDO TEXTO ESPECIFICO
+// Se usa para esperar el prompt ">" antes de mandar topic/payload.
+// ============================================================
+
+static bool sendATExpect(const char *cmd, const char *expected, uint32_t timeout_ms)
+{
+  memset(sim_rx, 0, sizeof(sim_rx));
+
+  HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), 3000);
+  HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 3000);
+
+  uint16_t idx = 0;
+  uint8_t byte = 0;
+  uint32_t t = HAL_GetTick();
+
+  while ((HAL_GetTick() - t) < timeout_ms && idx < sizeof(sim_rx) - 1)
+  {
+    if (HAL_UART_Receive(&huart1, &byte, 1, 10) == HAL_OK)
+    {
+      sim_rx[idx++] = (char)byte;
+      sim_rx[idx] = '\0';
+
+      if (strstr(sim_rx, expected))
+      {
+        snprintf(usb_tx, sizeof(usb_tx), "> %s\r\n< %s\r\n", cmd, sim_rx);
+        CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+        return true;
+      }
+
+      if (strstr(sim_rx, "ERROR"))
+      {
+        break;
+      }
+    }
+  }
+
+  snprintf(usb_tx, sizeof(usb_tx), "> %s\r\n< %s\r\n", cmd, sim_rx);
+  CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+  return false;
+}
+
+// ============================================================
 // BLOQUE IOTFORGE - PUBLICACION MQTT POR AT - NO MOVER
 // ============================================================
 
@@ -204,7 +247,12 @@ static void mqttPublishRaw(const char *topic, const char *payload)
   if (!mqttReady) return;
 
   snprintf(tx_buffer, sizeof(tx_buffer), "AT+CMQTTTOPIC=0,%d", (int)strlen(topic));
-  sendAT(tx_buffer, 300);
+  if (!sendATExpect(tx_buffer, ">", 3000))
+  {
+    mqttReady = false;
+    return;
+  }
+
   sendRaw(topic);
   HAL_UART_Transmit(&huart1, (uint8_t *)"\x1A", 1, 1000);
   HAL_Delay(500);
@@ -214,7 +262,12 @@ static void mqttPublishRaw(const char *topic, const char *payload)
   __HAL_UART_FLUSH_DRREGISTER(&huart1);
 
   snprintf(tx_buffer, sizeof(tx_buffer), "AT+CMQTTPAYLOAD=0,%d", (int)strlen(payload));
-  sendAT(tx_buffer, 300);
+  if (!sendATExpect(tx_buffer, ">", 3000))
+  {
+    mqttReady = false;
+    return;
+  }
+
   sendRaw(payload);
   HAL_UART_Transmit(&huart1, (uint8_t *)"\x1A", 1, 1000);
   HAL_Delay(500);
@@ -223,10 +276,17 @@ static void mqttPublishRaw(const char *topic, const char *payload)
   HAL_UART_Receive(&huart1, (uint8_t *)sim_rx, sizeof(sim_rx) - 1, 1500);
   __HAL_UART_FLUSH_DRREGISTER(&huart1);
 
-  sendAT("AT+CMQTTPUB=0,1,60", 3000);
+  sendAT("AT+CMQTTPUB=0,1,60", 5000);
+  if (respHas("ERROR"))
+  {
+    mqttReady = false;
+    return;
+  }
 
   snprintf(usb_tx, sizeof(usb_tx), "PUB [%s] => %s\r\n", topic, payload);
   CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+
+  HAL_Delay(300);
 }
 
 // ============================================================
@@ -278,7 +338,13 @@ static void setupA7670SA(void)
   sendAT("AT+CMQTTREL=0", 500);
   sendAT("AT+CMQTTSTOP", 1000);
   sendAT("AT+NETCLOSE", 3000);
-  sendAT("AT+NETOPEN", 4000);
+
+  // Esperar y verificar red antes de iniciar MQTT.
+  // En A7670SA, NETOPEN puede responder OK antes de que el stack de datos este listo.
+  sendAT("AT+NETOPEN", 10000);
+  sendAT("AT+NETOPEN?", 2000);
+  sendAT("AT+IPADDR", 2000);
+  HAL_Delay(5000);
 
   sendAT("AT+CSSLCFG=\"sslversion\",0,4", 500);
   sendAT("AT+CSSLCFG=\"authmode\",0,1", 500);
@@ -287,7 +353,7 @@ static void setupA7670SA(void)
   snprintf(tx_buffer, sizeof(tx_buffer), "AT+CSSLCFG=\"cacert\",0,\"%s\"", IOTF_CA_FILE);
   sendAT(tx_buffer, 800);
 
-  sendAT("AT+CMQTTSTART", 1500);
+  sendAT("AT+CMQTTSTART", 5000);
 
   snprintf(tx_buffer, sizeof(tx_buffer), "AT+CMQTTACCQ=0,\"%s-iotf\",1", IOTF_DEVICE_ID);
   sendAT(tx_buffer, 800);
@@ -298,9 +364,11 @@ static void setupA7670SA(void)
            "AT+CMQTTCONNECT=0,\"tcp://%s:%d\",60,1,\"%s\",\"%s\"",
            IOTF_BROKER, IOTF_PORT,
            IOTF_DEVICE_ID, IOTF_DEVICE_TOKEN);
-  sendAT(tx_buffer, 7000);
+  sendAT(tx_buffer, 20000);
 
-  if (respHas("+CMQTTCONNECT: 0,0"))
+  // Algunos firmwares responden primero OK y el URC +CMQTTCONNECT: 0,0 llega despues.
+  // Se acepta OK para conservar el comportamiento de la version que ya funcionaba.
+  if (respHas("+CMQTTCONNECT: 0,0") || respHas("OK"))
   {
     mqttReady = true;
     publishStatus("ONLINE");
