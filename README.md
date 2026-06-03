@@ -15,6 +15,7 @@
 **Software**
 - STM32CubeIDE
 - STM32CubeProgrammer
+- SSCOM32E — para cargar el certificado al módulo
 - Repositorio base: [SW-MCU-STM32-MQTT-058](https://github.com/republicofmakers/SW-MCU-STM32-MQTT-058)
 
 ---
@@ -53,15 +54,15 @@
 
 1. Ingresa a [iotforge.iaintegracion.space](https://iotforge.iaintegracion.space)
 2. Ve a **Nodo** y crea tu nodo
-3. Ve a **Variables** crea nueva variable 
-4. Ve a **Dispositivos** crea nuevo dispositivo stm32
+3. Ve a **Variables** crea nueva variable
+4. Ve a **Dispositivos** crea nuevo dispositivo STM32
 5. Anota:
    - `DEVICE_ID`
    - `DEVICE_TOKEN`
-   - 'VARIABLE ID'
-   - 'THING ID (NODO)'
- 
-____
+   - `VARIABLE_ID`
+   - `THING_ID` (Nodo)
+
+---
 
 ## Paso 2 — Descargar certificado TLS
 
@@ -70,15 +71,30 @@ IoTForge usa TLS con certificado ISRG Root X1 (Let's Encrypt).
 1. Descarga el certificado:  
    [https://letsencrypt.org/certs/isrgrootx1.pem](https://letsencrypt.org/certs/isrgrootx1.pem)
 2. Guarda el archivo como `isrgrootx1.pem`
+3. Verifica el tamaño exacto en PowerShell — lo necesitarás en el Paso 3:
+
+```powershell
+(Get-Item "C:\ruta\isrgrootx1.pem").Length
+```
 
 ---
 
 ## Paso 3 — Cargar certificado al módulo A7670SA
 
-Conecta el módulo por USB a tu PC e instala el driver **SIMCom USB Drivers A7670**.  
-Abre el puerto **SimTech HS-USB AT Port 9001** a 115200 baudios.
+### 3.1 — Conectar el módulo
 
-Ejecuta los siguientes comandos AT:
+Conecta el módulo A7670SA **directamente a la PC por USB** (no el UART del STM32) e instala el driver **SIMCom USB Drivers A7670**.
+
+En el Administrador de dispositivos aparecerán tres puertos:
+| Puerto | Uso |
+|--------|-----|
+| SimTech HS-USB AT Port 9011 | ✅ Comandos AT — usar este |
+| SimTech HS-USB Diagnostics 9011 | Flash de firmware |
+| SimTech HS-USB NMEA 9011 | GPS |
+
+Abre **SSCOM32E** y selecciona el puerto **AT Port 9011** a **115200 baudios**.
+
+### 3.2 — Verificar SIM y almacén de certificados
 
 ```
 AT+CPIN?
@@ -86,19 +102,41 @@ AT+CPIN?
 Debe responder `+CPIN: READY` — SIM reconocida.
 
 ```
-AT+FSCREATE="isrgrootx1.pem"
+AT+CMEE=2
+AT+CCERTLIST
 ```
-Crea el archivo en el sistema de archivos del módulo.
+Si responde solo `OK` sin listar nada, el almacén está vacío y listo.
+
+### 3.3 — Cargar el certificado con SSCOM32E
+
+> ⚠️ El firmware A131B03 del A7670SA-MASA **no soporta** `AT+FSCREATE` / `AT+FSWRITE`.  
+> Usar siempre `AT+CCERTDOWN` para cargar certificados.
+
+1. En SSCOM, escribe el comando con el tamaño exacto del archivo y envía:
 
 ```
-AT+FSWRITE="isrgrootx1.pem",0,<tamaño_en_bytes>,5000
+AT+CCERTDOWN="isrgrootx1.pem",<tamaño_en_bytes>
 ```
-Pega el contenido del certificado cuando el módulo lo solicite, termina con `Ctrl+Z`.
+
+2. El módulo responde con `>` — en ese momento:
+   - Haz clic en **OpenFile** y selecciona el archivo `isrgrootx1.pem`
+   - Haz clic en **SendFile**
+   - SSCOM envía el archivo automáticamente
+
+3. El módulo responde `OK` al finalizar la transferencia.
+
+### 3.4 — Verificar que el certificado quedó cargado
 
 ```
-AT+FSLS
+AT+CCERTLIST
 ```
-Verifica que `isrgrootx1.pem` aparezca en la lista.
+Debe responder:
+```
++CCERTLIST: "isrgrootx1.pem"
+OK
+```
+
+> ✅ El certificado **persiste aunque se apague el módulo** — solo se carga una vez.
 
 ---
 
@@ -113,7 +151,7 @@ Descarga el proyecto desde:
 
 ### 4.2 Reemplazar `main.c`
 
-Reemplaza el archivo `Core/Src/main.c` con el `main.c` de este ejemplo.
+Reemplaza el archivo `Core/Src/main.c` con el `main.c` de este repositorio.
 
 Actualiza tus credenciales IoTForge en los `#define` al inicio del archivo:
 
@@ -130,7 +168,7 @@ Actualiza tus credenciales IoTForge en los `#define` al inicio del archivo:
 
 ### 4.3 Reemplazar `st7735.h`
 
-Reemplaza el archivo `Core/Inc/st7735.h` con el de este ejemplo.
+Reemplaza el archivo `Core/Inc/st7735.h` con el de este repositorio.
 
 El cambio clave es activar el bloque correcto para pantalla **1.8" 128x160**:
 
@@ -208,8 +246,21 @@ mqtt.iaintegracion.space
 - El módulo A7670SA requiere **mínimo 2A de pico** — usar fuente dedicada, no alimentar desde USB-UART
 - El pin **PWRKEY (K)** del CN101 debe conectarse a GND para arranque automático
 - El certificado `isrgrootx1.pem` debe cargarse **una sola vez** al módulo — persiste aunque se apague
+- El firmware `A131B03A7670M6C_M` no soporta `AT+FSCREATE` — usar `AT+CCERTDOWN`
 - Los datos se publican en el topic: `iotforge/{THING_ID}/{VAR_ID}`
 - El heartbeat se publica en: `iotforge/{DEVICE_ID}/status` cada 30 segundos
+
+---
+
+## Troubleshooting
+
+| Síntoma | Causa | Solución |
+|---------|-------|----------|
+| `AT+FSCREATE` da ERROR | Firmware A131B03 no lo soporta | Usar `AT+CCERTDOWN` |
+| `AT+CCERTDOWN` no existe | Puerto incorrecto | Abrir AT Port 9011, no el UART del STM32 |
+| `+CMQTTCONNECT: 0,34` | Certificado cargado con `\r\n` | Recargar con SendFile desde SSCOM |
+| No conecta MQTT | Certificado no cargado | Verificar con `AT+CCERTLIST` |
+| SSCOM no recibe respuestas | Puerto equivocado | Usar COM del AT Port 9011 |
 
 ---
 
@@ -220,8 +271,6 @@ mqtt.iaintegracion.space
 ## Links de recursos
 
 - [Driver del módulo SIMCom USB](https://github.com/TDLOGY/SIMCOM_USB_DRIVER/tree/main)
-- [Programa SSCOM32E](https://drive.google.com/file/d/0B4GOwiN2Qm96R2V0dVFlSXltVWs/view?resourcekey=0-SR9QQdTR1vm3Zg7-tPDJIg)
+- [SSCOM32E](https://drive.google.com/file/d/0B4GOwiN2Qm96R2V0dVFlSXltVWs/view?resourcekey=0-SR9QQdTR1vm3Zg7-tPDJIg)
 - [Comandos MQTT del módulo A76XX](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/module/sim7680/A76XX%20Series%20MQTT_EX_AT%20Command%20Manual_V1.00.pdf)
 - [Manual del módulo A7670SA](https://manuals.plus/ae/1005006666698901#google_vignette)
-
----
