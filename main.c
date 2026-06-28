@@ -48,7 +48,8 @@
 #define IOTF_PORT         8883
 #define IOTF_THING_ID     "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 #define IOTF_DEVICE_ID    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-#define IOTF_DEVICE_TOKEN "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+#define IOTF_MQTT_USER    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx_v2"
+#define IOTF_MQTT_PASS    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 #define IOTF_VAR_ID       "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 #define IOTF_CA_FILE      "isrgrootx1.pem"
 
@@ -361,9 +362,9 @@ static void setupA7670SA(void)
   sendAT("AT+CMQTTSSLCFG=0,0", 500);
 
   snprintf(tx_buffer, sizeof(tx_buffer),
-           "AT+CMQTTCONNECT=0,\"tcp://%s:%d\",60,1,\"%s\",\"%s\"",
-           IOTF_BROKER, IOTF_PORT,
-           IOTF_DEVICE_ID, IOTF_DEVICE_TOKEN);
+         "AT+CMQTTCONNECT=0,\"tcp://%s:%d\",60,1,\"%s\",\"%s\"",
+         IOTF_BROKER, IOTF_PORT,
+         IOTF_MQTT_USER, IOTF_MQTT_PASS);
   sendAT(tx_buffer, 20000);
 
   // Algunos firmwares responden primero OK y el URC +CMQTTCONNECT: 0,0 llega despues.
