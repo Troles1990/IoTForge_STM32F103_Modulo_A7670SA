@@ -293,7 +293,7 @@ En la pantalla LCD verás:
 - **ADC Value** — valor del sensor en tiempo real
 - **MQTT OK** — conexión activa
 
-En el dashboard de IoTForge verifica que el dispositivo aparezca **ONLINE** y que cambie el valor de la variable. El intervalo configurado de datos es de 3 segundos y el heartbeat de 30 segundos; las esperas bloqueantes de comandos AT pueden alargar los intervalos reales.
+En el dashboard de IoTForge verifica que el dispositivo aparezca **ONLINE** y que cambie el valor de la variable. En la configuración validada, el ADC se lee cada 3 minutos, el valor se publica cada 5 minutos y el heartbeat se publica cada 5 minutos. La LCD se redibuja cada 1.5 minutos; las esperas bloqueantes de comandos AT pueden alargar los intervalos reales.
 
 La línea `PUB [...]` indica el envío realizado por el programa; por sí sola no acredita recepción en IoTForge. Para validar la entrega, comprueba el resultado final `+CMQTTPUB: 0,0` cuando esté disponible o la actualización en el dashboard, como se hizo en la prueba.
 
@@ -326,7 +326,9 @@ mqtt.iaintegracion.space
 - El certificado `isrgrootx1.pem` debe cargarse **una sola vez** al módulo — persiste aunque se apague
 - El firmware `A131B03A7670M6C_M` no soporta `AT+FSCREATE` — usar `AT+CCERTDOWN`
 - Los datos se publican en el topic: `iotforge/{THING_ID}/{VAR_ID}`
-- El heartbeat se publica en: `iotforge/{DEVICE_ID}/status` cada 30 segundos
+- El heartbeat se publica en: `iotforge/{DEVICE_ID}/status` cada 5 minutos
+- La lectura ADC se realiza cada 3 minutos y el valor conserva la última muestra hasta la siguiente publicación MQTT
+- La LCD se actualiza cada 1.5 minutos sin limpiar toda la pantalla en cada ciclo
 - **GND común es crítico** — un GND suelto causa caracteres corruptos en UART y reconexiones constantes
 
 ---
@@ -395,7 +397,9 @@ El archivo seleccionado debe coincidir con `IOTF_CA_FILE`. Si el reloj vuelve a 
 ### Opciones del firmware y personalización
 
 - `IOTF_CONTINUE_AFTER_AT_FAILURE=1` conserva la secuencia probada aunque falle el primer `AT`. En `0`, espera 3 segundos y reintenta sin avanzar a red.
-- `HEARTBEAT_MS` y `PUBLISH_MS` controlan los intervalos configurados.
+- `HEARTBEAT_MS` y `PUBLISH_MS` controlan las publicaciones cada 5 minutos.
+- `ADC_SAMPLE_MS` controla la lectura ADC cada 3 minutos.
+- `LCD_UPDATE_MS` controla la actualización de la LCD cada 1.5 minutos.
 - `userHardwareInit()` inicializa el hardware de aplicación.
 - `userReadInputs()` obtiene la lectura ADC; cámbiala para tu sensor.
 - `userUpdateDisplay()` controla la presentación en pantalla.

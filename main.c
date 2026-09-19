@@ -64,8 +64,10 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 // PUBLISH_MS controla cada cuanto se publica la variable de ejemplo.
 // ============================================================
 
-#define HEARTBEAT_MS 30000UL
-#define PUBLISH_MS   3000UL
+#define HEARTBEAT_MS 300000UL
+#define PUBLISH_MS   300000UL
+#define ADC_SAMPLE_MS 180000UL
+#define LCD_UPDATE_MS 90000UL
 
 // 1: prueba el flujo original y continua con AT aunque falte OK inicial.
 // 0: modo seguro; se detiene hasta que el modem responda AT.
@@ -634,10 +636,21 @@ static void userHardwareInit(void)
 
 static void userReadInputs(void)
 {
+  static bool sampleInitialized = false;
+  static uint32_t lastAdcReadMs = 0;
+  const uint32_t now = HAL_GetTick();
+
+  if (sampleInitialized && (now - lastAdcReadMs) < ADC_SAMPLE_MS)
+  {
+    return;
+  }
+
   HAL_ADC_Start(&hadc1);
   HAL_ADC_PollForConversion(&hadc1, 1000);
   readValue = HAL_ADC_GetValue(&hadc1);
   HAL_ADC_Stop(&hadc1);
+  lastAdcReadMs = now;
+  sampleInitialized = true;
 
   snprintf(usb_tx, sizeof(usb_tx), "ADC: %u\r\n", readValue);
   usbLog(usb_tx);
@@ -650,20 +663,49 @@ static void userReadInputs(void)
 
 static void userUpdateDisplay(void)
 {
-  snprintf(printData, sizeof(printData), "%u", readValue);
+  static bool screenInitialized = false;
+  static uint16_t lastDisplayedValue = 0xFFFFU;
+  static bool lastDisplayedMqttReady = false;
+  static uint32_t lastDisplayMs = 0;
+  const uint32_t now = HAL_GetTick();
+  const bool mqttStateChanged = (mqttReady != lastDisplayedMqttReady);
 
-  ST7735_FillScreen(ST7735_BLACK);
-  ST7735_WriteString(0, 0, "ADC Value", Font_11x18, ST7735_RED, ST7735_BLACK);
-  ST7735_WriteString(0, 30, printData, Font_11x18, ST7735_GREEN, ST7735_BLACK);
+  if (!screenInitialized)
+  {
+    ST7735_FillScreen(ST7735_BLACK);
+    ST7735_WriteString(0, 0, "ADC Value", Font_11x18, ST7735_RED, ST7735_BLACK);
+    screenInitialized = true;
+  }
 
-  if (mqttReady)
+  // Actualiza la TFT cada 1.5 minutos y solo las zonas que cambian.
+  if (!mqttStateChanged && (now - lastDisplayMs) < LCD_UPDATE_MS)
   {
-    ST7735_WriteString(0, 60, "MQTT OK", Font_7x10, ST7735_GREEN, ST7735_BLACK);
+    return;
   }
-  else
+
+  if ((now - lastDisplayMs) >= LCD_UPDATE_MS || readValue != lastDisplayedValue)
   {
-    ST7735_WriteString(0, 60, "Reconectando", Font_7x10, ST7735_RED, ST7735_BLACK);
+    snprintf(printData, sizeof(printData), "%4u", readValue);
+    ST7735_FillRectangle(0, 30, 128, 18, ST7735_BLACK);
+    ST7735_WriteString(0, 30, printData, Font_11x18, ST7735_GREEN, ST7735_BLACK);
+    lastDisplayedValue = readValue;
   }
+
+  if (mqttStateChanged)
+  {
+    ST7735_FillRectangle(0, 60, 128, 10, ST7735_BLACK);
+    if (mqttReady)
+    {
+      ST7735_WriteString(0, 60, "MQTT OK", Font_7x10, ST7735_GREEN, ST7735_BLACK);
+    }
+    else
+    {
+      ST7735_WriteString(0, 60, "Reconectando", Font_7x10, ST7735_RED, ST7735_BLACK);
+    }
+    lastDisplayedMqttReady = mqttReady;
+  }
+
+  lastDisplayMs = now;
 }
 
 /* USER CODE END 0 */
