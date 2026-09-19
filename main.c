@@ -29,6 +29,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+extern USBD_HandleTypeDef hUsbDeviceFS;
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,12 +48,15 @@
 #define IOTF_APN          "tu.apn.operador"
 #define IOTF_BROKER       "mqtt.iaintegracion.space"
 #define IOTF_PORT         8883
-#define IOTF_THING_ID     "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-#define IOTF_DEVICE_ID    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-#define IOTF_MQTT_USER    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx_v2"
-#define IOTF_MQTT_PASS    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-#define IOTF_VAR_ID       "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#define IOTF_THING_ID     "TU_THING_ID"
+#define IOTF_DEVICE_ID    "TU_DEVICE_ID"
+#define IOTF_MQTT_USER    "TU_DEVICE_ID_v2"
+#define IOTF_MQTT_PASS    "SHA256_DEL_DEVICE_TOKEN_64_HEX_MINUSCULAS"
+#define IOTF_VAR_ID       "TU_VAR_ID"
 #define IOTF_CA_FILE      "isrgrootx1.pem"
+
+// IOTF_MQTT_PASS debe ser SHA-256(DEVICE_TOKEN), 64 caracteres hex minusculos.
+// No pongas aqui el token original.
 
 // ============================================================
 // BLOQUE IOTFORGE - INTERVALOS BASE
@@ -61,6 +66,10 @@
 
 #define HEARTBEAT_MS 30000UL
 #define PUBLISH_MS   3000UL
+
+// 1: prueba el flujo original y continua con AT aunque falte OK inicial.
+// 0: modo seguro; se detiene hasta que el modem responda AT.
+#define IOTF_CONTINUE_AFTER_AT_FAILURE 1U
 
 // ============================================================
 // ZONA DEL USUARIO - CONSTANTES PROPIAS
@@ -121,8 +130,12 @@ static void MX_USART1_UART_Init(void);
 // ============================================================
 
 static void sendRaw(const char *data);
+static void usbLog(const char *text);
 static void sendAT(const char *cmd, uint32_t timeout_ms);
 static bool sendATExpect(const char *cmd, const char *expected, uint32_t timeout_ms);
+static bool sendATConnect(const char *cmd, uint32_t timeout_ms);
+static void logATResponse(const char *cmd, const char *response);
+static bool mqttCredentialsValid(void);
 static bool respHas(const char *needle);
 static void mqttPublishRaw(const char *topic, const char *payload);
 static void publishStatus(const char *status);
@@ -147,6 +160,51 @@ static void userUpdateDisplay(void);
 // BLOQUE IOTFORGE - ENVIO RAW AL MODULO A7670SA - NO MOVER
 // ============================================================
 
+static void usbLog(const char *text)
+{
+  static uint8_t buffer[512];
+  size_t length = strlen(text);
+  if (length >= sizeof(buffer))
+  {
+    length = sizeof(buffer) - 1U;
+  }
+
+  const uint32_t started = HAL_GetTick();
+  while (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+         hUsbDeviceFS.pClassData != NULL &&
+         ((USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData)->TxState != 0U)
+  {
+    if ((HAL_GetTick() - started) >= 100U)
+    {
+      return;
+    }
+    HAL_Delay(1);
+  }
+
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED ||
+      hUsbDeviceFS.pClassData == NULL)
+  {
+    return;
+  }
+
+  memcpy(buffer, text, length);
+  if (CDC_Transmit_FS(buffer, (uint16_t)length) != USBD_OK)
+  {
+    return;
+  }
+
+  while (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+         hUsbDeviceFS.pClassData != NULL &&
+         ((USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData)->TxState != 0U)
+  {
+    if ((HAL_GetTick() - started) >= 100U)
+    {
+      return;
+    }
+    HAL_Delay(1);
+  }
+}
+
 static void sendRaw(const char *data)
 {
   HAL_UART_Transmit(&huart1, (uint8_t *)data, strlen(data), 3000);
@@ -165,20 +223,85 @@ static bool respHas(const char *needle)
 // BLOQUE IOTFORGE - COMANDOS AT CON LOG USB - NO MOVER
 // ============================================================
 
+static void logATResponse(const char *cmd, const char *response)
+{
+  // AT+CMQTTCONNECT contiene la credencial v2. Nunca la copies al log USB.
+  if (strncmp(cmd, "AT+CMQTTCONNECT=", sizeof("AT+CMQTTCONNECT=") - 1) == 0)
+  {
+    snprintf(usb_tx, sizeof(usb_tx),
+             "> AT+CMQTTCONNECT=<credenciales ocultas>\r\n< %s\r\n",
+             strstr(response, "+CMQTTCONNECT: 0,") != NULL
+               ? strstr(response, "+CMQTTCONNECT: 0,")
+               : "Sin resultado MQTT; respuesta omitida para proteger credenciales");
+  }
+  else
+  {
+    snprintf(usb_tx, sizeof(usb_tx), "> %s\r\n< %s\r\n", cmd, response);
+  }
+
+  usbLog(usb_tx);
+}
+
+static bool mqttCredentialsValid(void)
+{
+  const size_t deviceIdLength = strlen(IOTF_DEVICE_ID);
+  const size_t userLength = strlen(IOTF_MQTT_USER);
+  const size_t passwordLength = strlen(IOTF_MQTT_PASS);
+
+  if (userLength != deviceIdLength + 3U ||
+      strncmp(IOTF_MQTT_USER, IOTF_DEVICE_ID, deviceIdLength) != 0 ||
+      strcmp(IOTF_MQTT_USER + deviceIdLength, "_v2") != 0 ||
+      passwordLength != 64U)
+  {
+    return false;
+  }
+
+  for (size_t i = 0; i < passwordLength; ++i)
+  {
+    const char c = IOTF_MQTT_PASS[i];
+    const bool isDigit = (c >= '0' && c <= '9');
+    const bool isLowerHex = (c >= 'a' && c <= 'f');
+    if (!isDigit && !isLowerHex)
+    {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 static void sendAT(const char *cmd, uint32_t timeout_ms)
 {
   memset(sim_rx, 0, sizeof(sim_rx));
 
-  HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), 3000);
-  HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 3000);
-
   uint16_t idx = 0;
   uint8_t byte = 0;
+  uint32_t timeoutCount = 0;
+  uint32_t errorCount = 0;
+  uint32_t halError = 0;
+  HAL_StatusTypeDef txStatus = HAL_OK;
+  HAL_StatusTypeDef txLineStatus = HAL_OK;
+
+  txStatus = HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), 3000);
+  txLineStatus = HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 3000);
+  halError |= HAL_UART_GetError(&huart1);
+  if (txStatus != HAL_OK)
+  {
+    errorCount++;
+  }
+  if (txLineStatus != HAL_OK)
+  {
+    errorCount++;
+  }
+
   uint32_t t = HAL_GetTick();
 
   while ((HAL_GetTick() - t) < timeout_ms && idx < sizeof(sim_rx) - 1)
   {
-    if (HAL_UART_Receive(&huart1, &byte, 1, 10) == HAL_OK)
+    const HAL_StatusTypeDef rxStatus = HAL_UART_Receive(&huart1, &byte, 1, 10);
+    halError |= HAL_UART_GetError(&huart1);
+
+    if (rxStatus == HAL_OK)
     {
       sim_rx[idx++] = (char)byte;
       sim_rx[idx] = '\0';
@@ -189,12 +312,50 @@ static void sendAT(const char *cmd, uint32_t timeout_ms)
         break;
       }
     }
+    else if (rxStatus == HAL_TIMEOUT)
+    {
+      timeoutCount++;
+    }
+    else
+    {
+      errorCount++;
+    }
   }
 
   sim_rx[idx] = '\0';
 
-  snprintf(usb_tx, sizeof(usb_tx), "> %s\r\n< %s\r\n", cmd, sim_rx);
-  CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+  logATResponse(cmd, sim_rx);
+
+  if (strcmp(cmd, "AT") == 0 && !respHas("OK\r\n"))
+  {
+    const uint32_t srError = huart1.Instance->SR &
+                             (USART_SR_ORE | USART_SR_NE | USART_SR_FE | USART_SR_PE);
+    snprintf(usb_tx, sizeof(usb_tx),
+             "UARTDBG AT tx=%d/%d rx=%u timeout=%lu errors=%lu HALerr=0x%08lX SRerr=0x%08lX BRR=0x%08lX CR1=0x%08lX CR3=0x%08lX GPIOA_CRH=0x%08lX MAPR=0x%08lX PCLK2=%lu\r\n",
+             (int)txStatus, (int)txLineStatus, (unsigned)idx,
+             (unsigned long)timeoutCount, (unsigned long)errorCount,
+             (unsigned long)halError, (unsigned long)srError,
+             (unsigned long)huart1.Instance->BRR,
+             (unsigned long)huart1.Instance->CR1,
+             (unsigned long)huart1.Instance->CR3,
+             (unsigned long)GPIOA->CRH, (unsigned long)AFIO->MAPR,
+             (unsigned long)HAL_RCC_GetPCLK2Freq());
+    usbLog(usb_tx);
+
+    size_t hexLength = 0;
+    hexLength += (size_t)snprintf(usb_tx + hexLength, sizeof(usb_tx) - hexLength,
+                                  "UARTDBG RXHEX:");
+    const uint16_t hexCount = (idx < 24U) ? idx : 24U;
+    for (uint16_t i = 0; i < hexCount && hexLength < sizeof(usb_tx); ++i)
+    {
+      hexLength += (size_t)snprintf(usb_tx + hexLength, sizeof(usb_tx) - hexLength,
+                                    " %02X", (unsigned)((uint8_t)sim_rx[i]));
+    }
+    snprintf(usb_tx + ((hexLength < sizeof(usb_tx)) ? hexLength : sizeof(usb_tx) - 1U),
+             (hexLength < sizeof(usb_tx)) ? sizeof(usb_tx) - hexLength : 1U,
+             "\r\n");
+    usbLog(usb_tx);
+  }
 }
 
 // ============================================================
@@ -222,8 +383,7 @@ static bool sendATExpect(const char *cmd, const char *expected, uint32_t timeout
 
       if (strstr(sim_rx, expected))
       {
-        snprintf(usb_tx, sizeof(usb_tx), "> %s\r\n< %s\r\n", cmd, sim_rx);
-        CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+        logATResponse(cmd, sim_rx);
         return true;
       }
 
@@ -234,8 +394,58 @@ static bool sendATExpect(const char *cmd, const char *expected, uint32_t timeout
     }
   }
 
-  snprintf(usb_tx, sizeof(usb_tx), "> %s\r\n< %s\r\n", cmd, sim_rx);
-  CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+  logATResponse(cmd, sim_rx);
+  return false;
+}
+
+// CMQTTCONNECT puede devolver OK antes del URC final.
+// Solo +CMQTTCONNECT: 0,0 confirma que el broker acepto la sesion.
+static bool sendATConnect(const char *cmd, uint32_t timeout_ms)
+{
+  memset(sim_rx, 0, sizeof(sim_rx));
+
+  HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), 3000);
+  HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 3000);
+
+  uint16_t idx = 0;
+  uint8_t byte = 0;
+  uint32_t t = HAL_GetTick();
+
+  while ((HAL_GetTick() - t) < timeout_ms && idx < sizeof(sim_rx) - 1)
+  {
+    if (HAL_UART_Receive(&huart1, &byte, 1, 10) == HAL_OK)
+    {
+      sim_rx[idx++] = (char)byte;
+      sim_rx[idx] = '\0';
+      t = HAL_GetTick();
+
+      // El URC debe estar completo; no se debe confundir con un CRLF previo.
+      const char *resultLine = strstr(sim_rx, "+CMQTTCONNECT: 0,");
+      if (resultLine != NULL)
+      {
+        const char *lineEnd = strstr(resultLine, "\r\n");
+        if (lineEnd != NULL)
+        {
+          if (strncmp(resultLine, "+CMQTTCONNECT: 0,0\r\n",
+                      sizeof("+CMQTTCONNECT: 0,0\r\n") - 1U) == 0)
+          {
+            logATResponse(cmd, sim_rx);
+            return true;
+          }
+
+          // Termina en un codigo de conexion distinto de cero.
+          break;
+        }
+      }
+
+      if (strstr(sim_rx, "ERROR"))
+      {
+        break;
+      }
+    }
+  }
+
+  logATResponse(cmd, sim_rx);
   return false;
 }
 
@@ -285,7 +495,7 @@ static void mqttPublishRaw(const char *topic, const char *payload)
   }
 
   snprintf(usb_tx, sizeof(usb_tx), "PUB [%s] => %s\r\n", topic, payload);
-  CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+  usbLog(usb_tx);
 
   HAL_Delay(300);
 }
@@ -321,9 +531,35 @@ static void mqttPublishValue(uint16_t value)
 
 static void setupA7670SA(void)
 {
+  static bool credentialsErrorReported = false;
   mqttReady = false;
 
-  sendAT("AT", 500);
+  if (!mqttCredentialsValid())
+  {
+    if (!credentialsErrorReported)
+    {
+      snprintf(usb_tx, sizeof(usb_tx),
+               "ERROR: Device v2 requiere usuario DEVICE_ID_v2 y password SHA-256 hex de 64 caracteres\r\n");
+      usbLog(usb_tx);
+      credentialsErrorReported = true;
+    }
+    HAL_Delay(2000);
+    return;
+  }
+  credentialsErrorReported = false;
+
+  sendAT("AT", 1000);
+  if (!respHas("OK\r\n"))
+  {
+#if IOTF_CONTINUE_AFTER_AT_FAILURE
+    usbLog("UARTDBG AT sin OK; se continua la secuencia original.\r\n");
+#else
+    usbLog("UARTDBG AT sin OK; se detiene la secuencia y se reintenta en 3 s.\r\n");
+    HAL_Delay(3000);
+    return;
+#endif
+  }
+
   sendAT("ATE0", 300);
   sendAT("AT+CPIN?", 500);
   sendAT("AT+CSQ", 500);
@@ -365,11 +601,7 @@ static void setupA7670SA(void)
          "AT+CMQTTCONNECT=0,\"tcp://%s:%d\",60,1,\"%s\",\"%s\"",
          IOTF_BROKER, IOTF_PORT,
          IOTF_MQTT_USER, IOTF_MQTT_PASS);
-  sendAT(tx_buffer, 20000);
-
-  // Algunos firmwares responden primero OK y el URC +CMQTTCONNECT: 0,0 llega despues.
-  // Se acepta OK para conservar el comportamiento de la version que ya funcionaba.
-  if (respHas("+CMQTTCONNECT: 0,0") || respHas("OK"))
+  if (sendATConnect(tx_buffer, 20000))
   {
     mqttReady = true;
     publishStatus("ONLINE");
@@ -408,7 +640,7 @@ static void userReadInputs(void)
   HAL_ADC_Stop(&hadc1);
 
   snprintf(usb_tx, sizeof(usb_tx), "ADC: %u\r\n", readValue);
-  CDC_Transmit_FS((uint8_t *)usb_tx, strlen(usb_tx));
+  usbLog(usb_tx);
 }
 
 // ============================================================

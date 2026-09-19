@@ -1,315 +1,198 @@
-# STM32 + A7670SA → IoTForge
-### Guía de integración MQTT celular con pantalla TFT ST7735
+# STM32 + A7670SA → IoTForge Device V2
 
----
+Ejemplo de MQTT sobre TLS con STM32F103C8T6, módem A7670SA y pantalla ST7735.
+Lee el ADC de PB1, publica su valor y envía un heartbeat `ONLINE`.
 
-## Requisitos
+La base de este firmware se probó en hardware: conexión V2 aceptada y valores visibles en IoTForge. El repositorio usa credenciales de ejemplo; debes reemplazarlas antes de cargarlo.
 
-**Hardware**
-- STM32F103C8T6 (Blue Pill)
-- Módulo celular A7670SA con breakout board (CN101 6 pines)
-- Pantalla TFT ST7735 1.8" (128x160)
-- Fuente de alimentación 5V / 2A para el módulo
-- SIM con datos activados
+## 1. Conecta el hardware
 
-**Software**
-- STM32CubeIDE
-- STM32CubeProgrammer
-- SSCOM32E — para cargar el certificado al módulo
-- Repositorio base: [SW-MCU-STM32-MQTT-058](https://github.com/republicofmakers/SW-MCU-STM32-MQTT-058)
+Necesitas una Blue Pill, el breakout A7670SA, SIM con datos, pantalla ST7735 1.8" 128×160, ST-LINK y una fuente dedicada de 5 V / 2 A para el breakout utilizado en este proyecto.
 
----
+### Módem → STM32
 
-## Conexiones
+| Pin del breakout | Conectar a |
+|---|---|
+| R / RXD | PA9 / USART1_TX |
+| T / TXD | PA10 / USART1_RX |
+| G / GND | GND común con STM32 y fuente |
+| V / VCC | Fuente externa de 5 V |
 
-### LCD ST7735 → STM32
+**TX va a RX y RX va a TX.** Comprueba continuidad de los jumpers: un cable abierto puede dejar el registro en `rx=0` aunque la transmisión indique éxito.
 
-| LCD     | STM32 |
-|---------|-------|
-| VCC     | 3.3V  |
-| GND     | GND   |
-| SCL     | PA5   |
-| SDA     | PA7   |
-| CS      | PA1   |
-| DC/A0   | PA2   |
-| LED/BL  | PA3   |
-| RES     | PB0   |
+La alimentación y los niveles UART dependen del breakout. Estas conexiones corresponden a la placa con conector G/R/T/K/V/G/S usada en la prueba; no extrapoles su alimentación al módulo SIMCom sin placa. Para K/PWRKEY y S/SLEEP, sigue el manual de tu placa y sus puentes de fábrica.
 
-### A7670SA (CN101) → STM32
+### Pantalla y sensor
 
-| CN101 Pin | Señal  | STM32 |
-|-----------|--------|-------|
-| G (1,6)   | GND    | GND   |
-| V (2)     | VCC    | **Fuente externa 5V 2A** |
-| T (4)     | TXD    | PA10 (RX) |
-| R (5)     | RXD    | PA9 (TX)  |
+| Señal | STM32 |
+|---|---|
+| LCD VCC / GND | 3.3 V / GND |
+| LCD SCL / SDA | PA5 / PA7 |
+| LCD CS / DC | PA1 / PA2 |
+| LCD LED / RES | PA3 / PB0 |
+| Entrada ADC | PB1 |
 
-> ⚠️ **GND común obligatorio** entre STM32, módulo A7670SA y fuente externa.
-> Un GND suelto o sin conectar causa corrupción en el UART — caracteres extraños, módulo que no responde y reconexiones constantes.
-> ⚠️ El pin SLEEP (S) y PWRKEY (K) van a GND del CN101.
-> ⚠️ TXD/RXD del módulo son 3.3V TTL — conexión directa al STM32 sin convertidor.
+## 2. Prepara el proyecto
 
----
+1. Abre en STM32CubeIDE el [proyecto base STM32-MQTT-058](https://github.com/republicofmakers/SW-MCU-STM32-MQTT-058).
+2. Sustituye `Core/Src/main.c` por [main.c](main.c).
+3. Sustituye el encabezado de pantalla `Core/Inc/st7735.h` por [ST7735.h](ST7735.h), conservando el nombre que usa el proyecto.
+4. Mantén USART1 en **115200, 8N1, sin control de flujo**, PA9 TX y PA10 RX.
 
-## Paso 1 — Crear dispositivo en IoTForge
+Este repositorio contiene los archivos para integrar en el proyecto base, no un proyecto CubeIDE completo.
 
-1. Ingresa a [iotforge.iaintegracion.space](https://iotforge.iaintegracion.space)
-2. Ve a **Nodo** y crea tu nodo
-3. Ve a **Variables** crea nueva variable
-4. Ve a **Dispositivos** crea nuevo dispositivo STM32
-5. Anota:
-   - `DEVICE_ID`
-   - `DEVICE_TOKEN`
-   - `VARIABLE_ID`
-   - `THING_ID` (Nodo)
+## 3. Configura Device V2
 
----
+En [IoTForge](https://iotforge.iaintegracion.space), crea o identifica tu nodo, variable y dispositivo. Necesitas:
 
-## Paso 2 — Descargar certificado TLS
+| Valor | Uso |
+|---|---|
+| `THING_ID` | ID del nodo |
+| `VAR_ID` | ID de la variable |
+| `DEVICE_ID` | ID del dispositivo |
+| `DEVICE_TOKEN` | Token del dispositivo, usado para calcular el hash |
 
-IoTForge usa TLS con certificado ISRG Root X1 (Let's Encrypt).
+La autenticación V2 utiliza:
 
-1. Descarga el certificado:
-   [https://letsencrypt.org/certs/isrgrootx1.pem](https://letsencrypt.org/certs/isrgrootx1.pem)
-2. Guarda el archivo como `isrgrootx1.pem`
-3. Verifica el tamaño exacto en PowerShell — lo necesitarás en el Paso 3:
+- Usuario: `DEVICE_ID` seguido de `_v2`.
+- Contraseña: **SHA-256 del token original**, en 64 caracteres hexadecimales minúsculos.
+- El sufijo `_v2` solo va en el usuario MQTT; el ID y los topics conservan el ID original.
+
+Calcula el hash localmente con PowerShell. Introduce el token sin espacios adicionales ni saltos de línea:
 
 ```powershell
-(Get-Item "C:\ruta\isrgrootx1.pem").Length
+$token = Read-Host "DEVICE_TOKEN"
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($token)
+    ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+} finally {
+    $sha.Dispose()
+    Remove-Variable token, bytes -ErrorAction SilentlyContinue
+}
 ```
 
----
-
-## Paso 3 — Cargar certificado al módulo A7670SA
-
-### 3.1 — Conectar el módulo
-
-Conecta el módulo A7670SA **directamente a la PC por USB** (no el UART del STM32) e instala el driver **SIMCom USB Drivers A7670**.
-
-En el Administrador de dispositivos aparecerán tres puertos:
-
-| Puerto | Uso |
-|--------|-----|
-| SimTech HS-USB AT Port 9011 | ✅ Comandos AT — usar este |
-| SimTech HS-USB Diagnostics 9011 | Flash de firmware |
-| SimTech HS-USB NMEA 9011 | GPS |
-
-Abre **SSCOM32E** y selecciona el puerto **AT Port 9011** a **115200 baudios**.
-
-### 3.2 — Verificar SIM y almacén de certificados
-
-```
-AT+CPIN?
-```
-Debe responder `+CPIN: READY` — SIM reconocida.
-
-```
-AT+CMEE=2
-AT+CCERTLIST
-```
-Si responde solo `OK` sin listar nada, el almacén está vacío y listo.
-
-### 3.3 — Cargar el certificado con SSCOM32E
-
-> ⚠️ El firmware A131B03 del A7670SA-MASA **no soporta** `AT+FSCREATE` / `AT+FSWRITE`.
-> Usar siempre `AT+CCERTDOWN` para cargar certificados.
-
-1. En SSCOM, escribe el comando con el tamaño exacto del archivo y envía:
-
-```
-AT+CCERTDOWN="isrgrootx1.pem",<tamaño_en_bytes>
-```
-
-2. El módulo responde con `>` — en ese momento:
-   - Haz clic en **OpenFile** y selecciona el archivo `isrgrootx1.pem`
-   - Haz clic en **SendFile**
-   - SSCOM envía el archivo automáticamente
-
-3. El módulo responde `OK` al finalizar la transferencia.
-
-### 3.4 — Verificar que el certificado quedó cargado
-
-```
-AT+CCERTLIST
-```
-Debe responder:
-```
-+CCERTLIST: "isrgrootx1.pem"
-OK
-```
-
-> ✅ El certificado **persiste aunque se apague el módulo** — solo se carga una vez.
-
----
-
-## Paso 4 — Calcular credenciales MQTT v2
-
-IoTForge usa autenticación MQTT v2 con credenciales derivadas del token del dispositivo:
-
-- **Username:** `DEVICE_ID` + `_v2`
-- **Password:** SHA256 del `DEVICE_TOKEN` en hexadecimal
-
-Calcula el SHA256 de tu token en PowerShell:
-
-```powershell
-$token = "TU_DEVICE_TOKEN_AQUI"
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($token)
-$hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
-($hash | ForEach-Object { $_.ToString("x2") }) -join ""
-```
-
-O en Linux/Mac:
-
-```bash
-echo -n "TU_DEVICE_TOKEN_AQUI" | sha256sum | cut -d' ' -f1
-```
-
-Guarda el resultado — lo usarás como `IOTF_MQTT_PASS` en el código.
-
----
-
-## Paso 5 — Configurar el proyecto STM32
-
-### 5.1 Descargar el repositorio base
-
-Descarga el proyecto desde:
-[https://github.com/republicofmakers/SW-MCU-STM32-MQTT-058](https://github.com/republicofmakers/SW-MCU-STM32-MQTT-058)
-
-Ábrelo en **STM32CubeIDE**.
-
-### 5.2 Reemplazar `main.c`
-
-Reemplaza el archivo `Core/Src/main.c` con el `main.c` de este repositorio.
-
-Actualiza tus credenciales IoTForge en los `#define` al inicio del archivo:
+Cambia estos valores al principio de `main.c`:
 
 ```c
 #define IOTF_APN          "tu.apn.operador"
 #define IOTF_BROKER       "mqtt.iaintegracion.space"
 #define IOTF_PORT         8883
-#define IOTF_THING_ID     "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-#define IOTF_DEVICE_ID    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-#define IOTF_MQTT_USER    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx_v2"
-#define IOTF_MQTT_PASS    "sha256_del_token_calculado_en_paso_4"
-#define IOTF_VAR_ID       "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#define IOTF_THING_ID     "TU_THING_ID"
+#define IOTF_DEVICE_ID    "TU_DEVICE_ID"
+#define IOTF_MQTT_USER    "TU_DEVICE_ID_v2"
+#define IOTF_MQTT_PASS    "SHA256_DEL_DEVICE_TOKEN_64_HEX_MINUSCULAS"
+#define IOTF_VAR_ID       "TU_VAR_ID"
 #define IOTF_CA_FILE      "isrgrootx1.pem"
 ```
 
-> ⚠️ `IOTF_MQTT_USER` es el `DEVICE_ID` con `_v2` al final.
-> ⚠️ `IOTF_MQTT_PASS` es el SHA256 del token calculado en el Paso 4 — **no el token raw**.
+En la prueba con WEEX se utilizó `internet.weex.mx`; usa el APN de tu SIM.
+No publiques el token ni su hash: **el hash también es una credencial MQTT**. Tampoco compartas HEX/BIN compilados con tus credenciales.
 
-### 5.3 Reemplazar `st7735.h`
+El firmware comprueba el formato del usuario y del hash antes de conectar. Esta comprobación no demuestra que el token pertenezca al dispositivo: eso lo valida el broker.
 
-Reemplaza el archivo `Core/Inc/st7735.h` con el de este repositorio.
+## 4. Carga el certificado en el módem
 
-El cambio clave es activar el bloque correcto para pantalla **1.8" 128x160**:
+Esta preparación se hace desde el **puerto USB AT del módem** con SSCOM u otro terminal. Es distinto del COM USB del STM32, que muestra los logs del programa.
 
-```c
-#define ST7735_IS_160X128 1
-#define ST7735_WIDTH  128
-#define ST7735_HEIGHT 160
-#define ST7735_XSTART 0
-#define ST7735_YSTART 0
-#define ST7735_ROTATION (ST7735_MADCTL_MX | ST7735_MADCTL_MY)
+1. Descarga [ISRG Root X1](https://letsencrypt.org/certs/isrgrootx1.pem) y guárdalo como `isrgrootx1.pem`.
+2. Consulta el tamaño exacto:
+
+```powershell
+(Get-Item "C:\ruta\isrgrootx1.pem").Length
 ```
 
-> Si la imagen aparece desplazada prueba con `XSTART 2` y `YSTART 1` (variante WaveShare).
+3. Envía lo siguiente, sustituyendo el tamaño:
 
----
-
-## Paso 6 — Compilar y cargar
-
-1. Compila el proyecto en STM32CubeIDE (`Ctrl+B`)
-2. Conecta el ST-Link al STM32
-3. Carga el firmware (`Run → Run`)
-4. Conecta el USB-C de la Blue Pill para ver los logs por puerto COM virtual
-
----
-
-## Paso 7 — Verificar funcionamiento
-
-Abre el puerto COM virtual (115200 baudios) y verifica el log de inicio:
-
+```text
+AT
+AT+CMEE=2
+AT+CCERTDOWN="isrgrootx1.pem",<tamaño_en_bytes>
 ```
-> AT+CREG?
-< +CREG: 0,1
-OK
-> AT+NETOPEN
+
+4. Al aparecer `>`, usa **OpenFile → SendFile** en SSCOM para enviar el archivo.
+5. Espera `OK` y verifica:
+
+```text
+AT+CCERTLIST
+```
+
+Debe aparecer `"isrgrootx1.pem"`. El certificado queda almacenado en el módem; no hace falta enviarlo cada arranque. El firmware selecciona ese archivo para TLS.
+
+## 5. Compila, carga y comprueba
+
+1. Compila en CubeIDE y verifica que termine sin errores.
+2. Carga el firmware con ST-LINK.
+3. Si utilizas CubeProgrammer, selecciona el HEX/BIN **recién generado**. Recompilar solo el ELF no siempre regenera esos archivos.
+4. Abre el COM USB del STM32 en MobaXterm o tu terminal. Reinicia la placa para ver el arranque.
+5. Comprueba esta respuesta:
+
+```text
+> AT
 < OK
-> AT+CMQTTSTART
-< OK
-> AT+CMQTTCONNECT=0,"tcp://mqtt.iaintegracion.space:8883",...
+
+> AT+CMQTTCONNECT=<credenciales ocultas>
 < +CMQTTCONNECT: 0,0
-OK
+
 PUB [iotforge/DEVICE_ID/status] => ONLINE
+PUB [iotforge/THING_ID/VAR_ID] => 2126
 ```
 
-`+CMQTTCONNECT: 0,0` = conexión exitosa ✅
+**`+CMQTTCONNECT: 0,0` confirma la conexión MQTT.** Un `OK` previo no basta: el firmware espera la línea de resultado completa.
 
-En la pantalla LCD verás:
-- **ADC Value** — valor del sensor en tiempo real
-- **MQTT OK** — conexión activa
+Finalmente verifica que IoTForge muestre el dispositivo conectado y que la variable cambie. La línea local `PUB` indica el envío realizado por el programa; no sustituye la confirmación de recepción en IoTForge.
 
-En el dashboard de IoTForge el dispositivo aparecerá como **ONLINE** y los datos llegarán cada 3 segundos.
+| Publicación | Topic | Intervalo configurado |
+|---|---|---|
+| Estado `ONLINE` | `iotforge/{DEVICE_ID}/status` | 30 s |
+| Valor ADC | `iotforge/{THING_ID}/{VAR_ID}` | 3 s |
 
----
+Los comandos AT son bloqueantes, por lo que los intervalos reales pueden ser mayores.
 
-## Flujo de datos
+## Si algo falla
 
+Empieza por UART, después red y finalmente MQTT:
+
+| Síntoma | Qué revisar |
+|---|---|
+| `AT` sin respuesta / `rx=0` | Continuidad de ambos jumpers, cruce TX/RX, GND, alimentación y estado del módem |
+| Caracteres extraños | Baudios, GND, contactos y niveles eléctricos |
+| `AT` responde pero no hay red | SIM, registro, APN e IP |
+| No conecta con TLS | Certificado seleccionado y reloj del módem |
+| MQTT rechaza la conexión | Usuario con `_v2`, hash de 64 caracteres y dispositivo correspondiente |
+| Conecta pero no cambia la variable | `THING_ID`, `VAR_ID` y asociación en IoTForge |
+| Sigues viendo `MINI AT` | Se cargó el firmware de diagnóstico o un artefacto viejo |
+
+Para inspeccionar el módem manualmente, detén primero el programa del STM32 para evitar comandos simultáneos:
+
+```text
+AT
+AT+IPR?
+AT+IFC?
+AT+CSCLK?
+AT+CPIN?
+AT+CSQ
+AT+CEREG?
+AT+CGATT?
+AT+CGDCONT?
+AT+CGPADDR=1
+AT+NETOPEN?
+AT+CCERTLIST
+AT+CCLK?
 ```
-Sensor ADC (PB1)
-      │
-      ▼
-   STM32F103
-      │ UART 115200
-      ▼
-  A7670SA LTE
-      │ TLS 8883
-      ▼
-mqtt.iaintegracion.space
-      │
-      ▼
-  IoTForge Dashboard
-```
 
----
+En la configuración probada: `IPR=115200`, `IFC=0,0`, `CSCLK=0`.
+Si falla el primer `AT`, el firmware imprime diagnóstico UART; `tx=0` significa `HAL_OK`, no cero bytes enviados.
 
-## Notas importantes
+La opción `IOTF_CONTINUE_AFTER_AT_FAILURE=1` conserva la secuencia probada. Puedes ponerla en `0` para reintentar `AT` sin avanzar a red cuando el módem no responda.
 
-- El módulo A7670SA requiere **mínimo 2A de pico** — usar fuente dedicada, no alimentar desde USB-UART
-- El pin **PWRKEY (K)** del CN101 debe conectarse a GND para arranque automático
-- El certificado `isrgrootx1.pem` debe cargarse **una sola vez** al módulo — persiste aunque se apague
-- El firmware `A131B03A7670M6C_M` no soporta `AT+FSCREATE` — usar `AT+CCERTDOWN`
-- Los datos se publican en el topic: `iotforge/{THING_ID}/{VAR_ID}`
-- El heartbeat se publica en: `iotforge/{DEVICE_ID}/status` cada 30 segundos
-- **GND común es crítico** — un GND suelto causa caracteres corruptos en UART y reconexiones constantes
+## Personalizar la aplicación
 
----
+- `userHardwareInit()`: pantalla y hardware propio.
+- `userReadInputs()`: lectura del sensor.
+- `userUpdateDisplay()`: contenido de la pantalla.
+- `mqttPublishValue()`: dato enviado a la variable.
 
-## Troubleshooting
+La base validada incluye autenticación V2, espera del resultado MQTT completo y registro USB con espera acotada cuando está ocupado. La copia pública sustituye las credenciales por ejemplos y reduce el diagnóstico UART a fallos.
 
-| Síntoma | Causa | Solución |
-|---------|-------|----------|
-| Caracteres `▒` en el log | GND suelto o no común | Verificar GND entre STM32, módulo y fuente |
-| Módulo se reinicia (`*ATREADY`) | Alimentación insuficiente o GND suelto | Fuente dedicada 5V 2A + GND común |
-| `AT+FSCREATE` da ERROR | Firmware A131B03 no lo soporta | Usar `AT+CCERTDOWN` |
-| `AT+CCERTDOWN` no existe | Puerto incorrecto | Abrir AT Port 9011, no el UART del STM32 |
-| `+CMQTTCONNECT: 0,3` | Credenciales incorrectas | Verificar `IOTF_MQTT_USER` y `IOTF_MQTT_PASS` |
-| `+CMQTTCONNECT: 0,34` | Certificado cargado con `\r\n` | Recargar con SendFile desde SSCOM |
-| `+CMQTTCONNECT: 0,9` | Puerto 8883 bloqueado por ISP | Probar con otra SIM o verificar APN |
-| No conecta MQTT | Certificado no cargado | Verificar con `AT+CCERTLIST` |
-| SSCOM no recibe respuestas | Puerto equivocado | Usar COM del AT Port 9011 |
-| `+CGREG: 0,0` | SIM sin datos activos | Verificar plan de datos y APN |
-
----
-
-*Guía generada para IoTForge — Ejemplo STM32 A7670SA*
-
----
-
-## Links de recursos
-
-- [Driver del módulo SIMCom USB](https://github.com/TDLOGY/SIMCOM_USB_DRIVER/tree/main)
-- [SSCOM32E](https://drive.google.com/file/d/0B4GOwiN2Qm96R2V0dVFlSXltVWs/view?resourcekey=0-SR9QQdTR1vm3Zg7-tPDJIg)
-- [Comandos MQTT del módulo A76XX](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/module/sim7680/A76XX%20Series%20MQTT_EX_AT%20Command%20Manual_V1.00.pdf)
-- [Manual del módulo A7670SA](https://manuals.plus/ae/1005006666698901#google_vignette)
+[Drivers USB SIMCom](https://github.com/TDLOGY/SIMCOM_USB_DRIVER/tree/main) · [Proyecto base](https://github.com/republicofmakers/SW-MCU-STM32-MQTT-058)
